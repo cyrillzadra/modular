@@ -717,7 +717,7 @@ fn _get_rtx3090_target() -> __mlir_type.`!kgen.target`:
     ]
 
 # https://www.nvidia.com/en-us/geforce/graphics-cards/30-series/rtx-3090-3090ti/
-alias RTX3090 = Info(
+alias RTX3090 = GPUInfo(
     name="NVIDIA GeForce RTX 3090", 
     vendor=Vendor.NVIDIA_GPU,
     api="cuda", 
