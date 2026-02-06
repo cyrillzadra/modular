@@ -1,5 +1,5 @@
 # ===----------------------------------------------------------------------=== #
-# Copyright (c) 2025, Modular Inc. All rights reserved.
+# Copyright (c) 2026, Modular Inc. All rights reserved.
 #
 # Licensed under the Apache License v2.0 with LLVM Exceptions:
 # https://llvm.org/LICENSE.txt
@@ -331,7 +331,7 @@ class AlgebraicDim(Dim):
     def apply(cls, op: kgen.POC, *operands: DimLike):  # noqa: ANN206
         # kgen.ParamOperatorAttr eagerly folds on construction!
         #  - this can return static or symbolic dims
-        #  - let Dim decide what type to returtn
+        #  - let Dim decide what type to return
         attr = kgen.ParamOperatorAttr(
             op, [Dim(operand).to_mlir() for operand in operands]
         )

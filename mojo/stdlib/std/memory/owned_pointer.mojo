@@ -1,5 +1,5 @@
 # ===----------------------------------------------------------------------=== #
-# Copyright (c) 2025, Modular Inc. All rights reserved.
+# Copyright (c) 2026, Modular Inc. All rights reserved.
 #
 # Licensed under the Apache License v2.0 with LLVM Exceptions:
 # https://llvm.org/LICENSE.txt
@@ -21,12 +21,15 @@ from memory import OwnedPointer
 
 from builtin.constrained import _constrained_conforms_to
 from builtin.rebind import downcast, trait_downcast
-from format._utils import Repr, FormatStruct
-from reflection.type_info import _unqualified_type_name
+from format._utils import (
+    Repr,
+    FormatStruct,
+    TypeNames,
+    constrained_conforms_to_writable,
+)
 
 
-@register_passable
-struct OwnedPointer[T: AnyType](Writable):
+struct OwnedPointer[T: AnyType](RegisterType, Writable):
     """A safe, owning, smart pointer.
 
     This smart pointer is designed for cases where there is clear ownership
@@ -256,12 +259,7 @@ struct OwnedPointer[T: AnyType](Writable):
         Constraints:
             `T` must conform to Writable.
         """
-        _constrained_conforms_to[
-            conforms_to(Self.T, Writable),
-            Parent=Self,
-            Element = Self.T,
-            ParentConformsTo="Writable",
-        ]()
+        constrained_conforms_to_writable[Self.T, Parent=Self]()
         FormatStruct(writer, "OwnedPointer").params(
-            _unqualified_type_name[Self.T]()
+            TypeNames[Self.T](),
         ).fields(Repr(trait_downcast[Writable](self[])))

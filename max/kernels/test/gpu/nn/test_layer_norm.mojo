@@ -1,5 +1,5 @@
 # ===----------------------------------------------------------------------=== #
-# Copyright (c) 2025, Modular Inc. All rights reserved.
+# Copyright (c) 2026, Modular Inc. All rights reserved.
 #
 # Licensed under the Apache License v2.0 with LLVM Exceptions:
 # https://llvm.org/LICENSE.txt
@@ -43,8 +43,8 @@ fn run_layer_norm_block[
         data_h[i] = val
 
     for i in range(cols):
-        gamma_h[i] = ((i + cols) / cols).cast[dtype]()
-        beta_h[i] = (i / cols).cast[dtype]()
+        gamma_h[i] = (Float64(i + cols) / Float64(cols)).cast[dtype]()
+        beta_h[i] = (Float64(i) / Float64(cols)).cast[dtype]()
 
     var data_d = ctx.enqueue_create_buffer[dtype](rows * cols)
     var gamma_d = ctx.enqueue_create_buffer[dtype](cols)
@@ -98,9 +98,8 @@ fn run_layer_norm_block[
     @__copy_capture(data_buf, gamma, beta, epsilon)
     fn run_func_ln() raises:
         comptime kernel = layer_norm_gpu_block[
+            LayoutType = beta.LayoutType,
             origin = beta.origin,
-            shape_types = beta.shape_types,
-            stride_types = beta.stride_types,
             UInt(simd_width),
             input_fn,
             gamma_fn,
@@ -164,8 +163,8 @@ fn run_layer_norm_gpu[
         data_h[i] = val
 
     for i in range(cols):
-        gamma_h[i] = ((i + cols) / cols).cast[dtype]()
-        beta_h[i] = (i / cols).cast[dtype]()
+        gamma_h[i] = (Float64(i + cols) / Float64(cols)).cast[dtype]()
+        beta_h[i] = (Float64(i) / Float64(cols)).cast[dtype]()
 
     var data_d = ctx.enqueue_create_buffer[dtype](rows * cols)
     var gamma_d = ctx.enqueue_create_buffer[dtype](cols)
@@ -258,8 +257,8 @@ fn run_layer_norm_warp_tiling[
         data_h[i] = val
 
     for i in range(cols):
-        gamma_h[i] = ((i + cols) / cols).cast[dtype]()
-        beta_h[i] = (i / cols).cast[dtype]()
+        gamma_h[i] = (Float64(i + cols) / Float64(cols)).cast[dtype]()
+        beta_h[i] = (Float64(i) / Float64(cols)).cast[dtype]()
 
     var data_d = ctx.enqueue_create_buffer[dtype](rows * cols)
     var gamma_d = ctx.enqueue_create_buffer[dtype](cols)
@@ -314,9 +313,8 @@ fn run_layer_norm_warp_tiling[
     @__copy_capture(data_buf, gamma, beta, epsilon)
     fn run_func_ln() raises:
         comptime kernel = layer_norm_gpu_warp_tiling[
+            LayoutType = beta.LayoutType,
             origin = beta.origin,
-            shape_types = beta.shape_types,
-            stride_types = beta.stride_types,
             UInt(simd_width),
             input_fn,
             gamma_fn,

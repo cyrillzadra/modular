@@ -1,5 +1,5 @@
 # ===----------------------------------------------------------------------=== #
-# Copyright (c) 2025, Modular Inc. All rights reserved.
+# Copyright (c) 2026, Modular Inc. All rights reserved.
 #
 # Licensed under the Apache License v2.0 with LLVM Exceptions:
 # https://llvm.org/LICENSE.txt
@@ -18,6 +18,7 @@ import functools
 from collections.abc import Sequence
 from typing import Any
 
+from max._core.driver import is_virtual_device_mode
 from max.dtype import DType
 from max.graph import (
     BufferType,
@@ -55,12 +56,17 @@ from max.nn.legacy.rotary_embedding import (
 )
 from max.nn.legacy.transformer import ReturnHiddenStates, ReturnLogits
 from max.nn.legacy.transformer.distributed_transformer import (
-    distribute_value,
     forward_sharded_layers,
 )
 
 from .layers.moe_gate import DeepseekV3TopKRouter
 from .model_config import DeepseekV3Config
+
+
+def distribute_value(
+    v: TensorValue, devices: list[DeviceRef]
+) -> list[TensorValue]:
+    return [v.to(device) for device in devices]
 
 
 def _unpack_kv_collections(
@@ -89,7 +95,13 @@ def _validate_parallelism_config(config: DeepseekV3Config) -> None:
             f"data_parallel_degree must match the number of devices ({num_devices}). "
             "Tensor-parallel attention is not supported for DeepseekV3."
         )
-    if num_devices > 1 and config.ep_config is None:
+    # Skip EP validation in virtual device mode (compilation-only) since EP
+    # will be disabled later due to NVSHMEM linking requirements
+    if (
+        num_devices > 1
+        and config.ep_config is None
+        and not is_virtual_device_mode()
+    ):
         raise ValueError(
             "Expert-parallel (ep_config) must be enabled for multi-GPU DeepseekV3."
         )
@@ -102,10 +114,12 @@ class DeepseekV3DecoderLayer(Module):
         config: DeepseekV3Config,
         layer_idx: int,
         ep_manager: EPBatchManager | None = None,
+        is_nextn: bool = False,
     ) -> None:
         super().__init__()
         self.config = config
         self.ep_manager = ep_manager
+        self.is_nextn = is_nextn
         num_devices = len(config.devices)
 
         # Create Multi-head Latent Attention layer.
@@ -149,7 +163,12 @@ class DeepseekV3DecoderLayer(Module):
 
         # Create MLP or MoE layer
         self.mlp = self._get_mlp(config, layer_idx)
-        self.mlp_shards = self.mlp.shard(config.devices)
+
+        self.mlp_shards: list[MLP | MoE]
+        if self.mlp.sharding_strategy is not None:
+            self.mlp_shards = list(self.mlp.shard(config.devices))
+        else:
+            self.mlp_shards = [self.mlp]
 
         # Create normalization layers
         create_norm = functools.partial(
@@ -231,11 +250,10 @@ class DeepseekV3DecoderLayer(Module):
                 moe = MoE(**moe_kwargs)
 
             num_devices = len(config.devices)
-            moe.sharding_strategy = (
-                ShardingStrategy.expert_parallel(num_devices)
-                if self.ep_manager is not None
-                else ShardingStrategy.replicate(num_devices)
-            )
+            if num_devices > 1:
+                moe.sharding_strategy = ShardingStrategy.expert_parallel(
+                    num_devices
+                )
             return moe
         else:
             mlp = MLP(
@@ -321,7 +339,12 @@ class DeepseekV3DecoderLayer(Module):
             # Single-GPU non-EP path
             mlp_outs = forward_sharded_layers(self.mlp_shards, norm_outs)
 
-        hs = [h + mlp_out for h, mlp_out in zip(hs, mlp_outs, strict=True)]
+        if self.is_nextn:
+            # NextN/MTP decoder: skip the second residual connection.
+            # The MoE output is used directly as hidden_states.
+            hs = mlp_outs
+        else:
+            hs = [h + mlp_out for h, mlp_out in zip(hs, mlp_outs, strict=True)]
 
         return hs
 
@@ -443,7 +466,9 @@ class DeepseekV3(Module):
 
         mla_prefill_metadata: list[MLAPrefillMetadata] = []
         freqs_cis = distribute_value(self.rope.freqs_cis, devices)
-        input_row_offsets_ = distribute_value(input_row_offsets, devices)
+        input_row_offsets_ = ops.distributed_broadcast(
+            input_row_offsets, signal_buffers
+        )
 
         if len(devices) > 1:
             # Split batch across devices for data-parallel attention.
@@ -590,38 +615,87 @@ class DeepseekV3(Module):
         offsets = None
 
         if self.return_logits == ReturnLogits.VARIABLE:
-            return_n_logits_range = ops.range(
-                start=return_n_logits[0],
-                stop=0,
-                step=-1,
-                out_dim="return_n_logits_range",
-                dtype=DType.int64,
-                device=devices[0],
-            )
-            offsets = (
-                ops.unsqueeze(input_row_offsets_[0][1:], -1)
-                - return_n_logits_range
-            )
-            last_indices = ops.reshape(offsets, shape=(-1,))
-            logits = ops.gather(
-                ops.cast(
-                    self.lm_head(
-                        forward_sharded_layers(self.norm_shards, h),
-                        signal_buffers,
-                    )[0],
+            if self.ep_manager is not None:
+                # EP case: gather variable tokens per device, then allgather
+                # Create the range once on device 0 (range inputs must be on CPU)
+                return_n_logits_range = ops.range(
+                    start=return_n_logits[0],
+                    stop=0,
+                    step=-1,
+                    out_dim="return_n_logits_range",
+                    dtype=DType.int64,
+                    device=devices[0],
+                )
+                variable_tokens_per_dev: list[TensorValue] = []
+                for dev_idx in range(len(devices)):
+                    h0 = h[dev_idx]
+                    dev_return_n_logits_range = return_n_logits_range.to(
+                        devices[dev_idx]
+                    )
+                    # Compute indices for last return_n_logits tokens per
+                    # sequence on this device
+                    dev_offsets = (
+                        ops.unsqueeze(input_row_offsets_[dev_idx][1:], -1)
+                        - dev_return_n_logits_range
+                    )
+                    indices = ops.reshape(dev_offsets, shape=(-1,))
+                    variable_h = ops.gather(h0, indices, axis=0)
+                    variable_tokens_per_dev.append(variable_h)
+
+                variable_tokens_distributed = ops.allgather(
+                    variable_tokens_per_dev, signal_buffers
+                )
+
+                norm_variable_tokens = forward_sharded_layers(
+                    self.norm_shards, variable_tokens_distributed
+                )
+                logits = ops.cast(
+                    self.lm_head(norm_variable_tokens, signal_buffers)[0],
                     DType.float32,
-                ),
-                last_indices,
-                axis=0,
-            )
-            offsets = ops.range(
-                0,
-                TensorValue(last_indices.shape[0]) + return_n_logits[0],
-                return_n_logits[0],
-                out_dim="logit_offsets",
-                dtype=DType.int64,
-                device=devices[0],
-            )
+                )
+
+                offsets = ops.range(
+                    0,
+                    TensorValue(logits.shape[0]) + return_n_logits[0],
+                    return_n_logits[0],
+                    out_dim="logit_offsets",
+                    dtype=DType.int64,
+                    device=devices[0],
+                )
+            else:
+                # Non-EP case: keep existing single-device implementation
+                return_n_logits_range = ops.range(
+                    start=return_n_logits[0],
+                    stop=0,
+                    step=-1,
+                    out_dim="return_n_logits_range",
+                    dtype=DType.int64,
+                    device=devices[0],
+                )
+                last_offsets = (
+                    ops.unsqueeze(input_row_offsets_[0][1:], -1)
+                    - return_n_logits_range
+                )
+                last_indices = ops.reshape(last_offsets, shape=(-1,))
+                logits = ops.gather(
+                    ops.cast(
+                        self.lm_head(
+                            forward_sharded_layers(self.norm_shards, h),
+                            signal_buffers,
+                        )[0],
+                        DType.float32,
+                    ),
+                    last_indices,
+                    axis=0,
+                )
+                offsets = ops.range(
+                    0,
+                    TensorValue(last_indices.shape[0]) + return_n_logits[0],
+                    return_n_logits[0],
+                    out_dim="logit_offsets",
+                    dtype=DType.int64,
+                    device=devices[0],
+                )
         elif self.return_logits == ReturnLogits.ALL:
             logits = ops.cast(
                 self.lm_head(
@@ -642,15 +716,18 @@ class DeepseekV3(Module):
             ret_val += (logits, offsets)
 
         if self.return_hidden_states == ReturnHiddenStates.ALL:
-            hidden_states = h[0] if isinstance(h, list) else h
-            ret_val += (hidden_states,)
+            ret_val += tuple(h)
         elif self.return_hidden_states == ReturnHiddenStates.LAST:
-            ret_val += (last_token_h,)
+            if self.ep_manager is not None:
+                ret_val += tuple(last_token_per_dev)
+            else:
+                # For non-EP case, distribute the single tensor to match interface
+                ret_val += tuple(distribute_value(last_token_h, devices))
         elif self.return_hidden_states == ReturnHiddenStates.ALL_NORMALIZED:
-            norm_h = forward_sharded_layers(self.norm_shards, h)[0]
-            ret_val += (norm_h,)
+            norm_h = forward_sharded_layers(self.norm_shards, h)
+            ret_val += tuple(norm_h)
         elif self.return_hidden_states == ReturnHiddenStates.LAST_NORMALIZED:
-            ret_val += (norm_last_token[0],)
+            ret_val += tuple(norm_last_token)
 
         return ret_val
 

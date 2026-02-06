@@ -1,5 +1,5 @@
 # ===----------------------------------------------------------------------=== #
-# Copyright (c) 2025, Modular Inc. All rights reserved.
+# Copyright (c) 2026, Modular Inc. All rights reserved.
 #
 # Licensed under the Apache License v2.0 with LLVM Exceptions:
 # https://llvm.org/LICENSE.txt
@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -25,13 +26,14 @@ from max.dtype import DType
 from max.engine import InferenceSession
 from max.graph.weights import Weights, WeightsAdapter
 from max.interfaces import BaseContextType, LogProbabilities
-from max.kv_cache import infer_optimal_batch_size
 from max.nn.legacy.kv_cache import KVCacheInputs
 from max.nn.legacy.transformer import ReturnHiddenStates, ReturnLogits
 from transformers import AutoConfig
 
 if TYPE_CHECKING:
     from ..config import PipelineConfig
+
+logger = logging.getLogger("max.pipelines")
 
 from max.graph import DeviceRef
 
@@ -100,8 +102,12 @@ class ModelOutputs:
     logit_offsets: Buffer | None = None
     """Offsets to access variable length logits for each sequence."""
 
-    hidden_states: Buffer | None = None
-    """Hidden states for a variable number of tokens per sequence."""
+    hidden_states: Buffer | list[Buffer] | None = None
+    """Hidden states for a variable number of tokens per sequence.
+
+    For data parallel models, this can be a list of Buffers where each Buffer
+    contains hidden states for the sequences assigned to that device.
+    """
 
 
 class ModelInputs:
@@ -136,13 +142,17 @@ class ModelInputs:
     kv_cache_inputs: KVCacheInputs | None = None
 
     lora_ids: Buffer | None = None
-    """Tensor containing the LoRA ids."""
+    """Buffer containing the LoRA ids."""
 
     lora_ranks: Buffer | None = None
-    """Tensor containing the LoRA ranks"""
+    """Buffer containing the LoRA ranks"""
 
-    hidden_states: Buffer | None = None
-    """Hidden states for a variable number of tokens per sequence."""
+    hidden_states: Buffer | list[Buffer] | None = None
+    """Hidden states for a variable number of tokens per sequence.
+
+    For data parallel models, this can be a list of Buffers where each Buffer
+    contains hidden states for the sequences assigned to that device.
+    """
 
     def update(self, **kwargs) -> None:
         key: str
@@ -150,6 +160,25 @@ class ModelInputs:
         for key, value in kwargs.items():
             if hasattr(self, key) and value is not None:
                 setattr(self, key, value)
+
+
+@dataclass
+class _DeviceGraphState:
+    buffers: list[Buffer]
+    outputs: ModelOutputs
+
+
+class InputKey:
+    def __init__(self, *inputs: Buffer):
+        self.keys = tuple((input.dtype, tuple(input.shape)) for input in inputs)
+
+    def __eq__(self, other: Any):
+        if not isinstance(other, InputKey):
+            return False
+        return self.keys == other.keys
+
+    def __hash__(self) -> int:
+        return hash(self.keys)
 
 
 class PipelineModel(ABC, Generic[BaseContextType]):
@@ -196,7 +225,7 @@ class PipelineModel(ABC, Generic[BaseContextType]):
                 pipeline_config=pipeline_config,
                 devices=self.device_refs,
                 kv_cache_config=kv_cache_config,
-                cache_dtype=encoding.cache_dtype,
+                cache_dtype=pipeline_config.model.kv_cache.cache_dtype,
             )
             assert self.kv_cache_config._available_cache_memory is not None, (
                 "Available cache memory should have been set during memory estimation"
@@ -225,6 +254,10 @@ class PipelineModel(ABC, Generic[BaseContextType]):
             if pipeline_config.lora
             else None
         )
+        self._device_graph_capture_enabled = (
+            pipeline_config.device_graph_capture
+        )
+        self._device_graph_states: dict[InputKey, _DeviceGraphState] = {}
 
     @property
     def lora_manager(self) -> LoRAManager | None:
@@ -314,53 +347,6 @@ class PipelineModel(ABC, Generic[BaseContextType]):
         )
 
     @classmethod
-    def infer_optimal_batch_size(
-        cls,
-        pipeline_config: PipelineConfig,
-        available_cache_memory: int,
-        huggingface_config: AutoConfig,
-        devices: list[Device],
-        kv_cache_config: KVCacheConfig,
-        cache_dtype: DType,
-    ) -> int:
-        """Returns the estimated optimal batch size to run the model
-        given current memory constraints."""
-        if not issubclass(cls, KVCacheMixin):
-            # we rely on the KVCache setup to know optimal batch size.
-            # If we don't have that, default to BS=1.
-            return 1
-        elif len(devices) == 1 and devices[0].is_host:
-            # batching on CPU is generally not useful, so we hard-code a batch size of 1.
-            return 1
-
-        # TODO we should map HF configs to a unified MAX Config object
-        # this would help avoid these excessive calls to class methods.
-        kv_params = cls.get_kv_params(
-            huggingface_config=huggingface_config,
-            pipeline_config=pipeline_config,
-            devices=[DeviceRef.from_device(d) for d in devices],
-            kv_cache_config=kv_cache_config,
-            cache_dtype=cache_dtype,
-        )
-        n_layers = kv_params.num_layers
-        inferred_batch_size = infer_optimal_batch_size(
-            params=kv_params,
-            max_seq_len=cls.calculate_max_seq_len(
-                pipeline_config, huggingface_config=huggingface_config
-            ),
-            num_layers=n_layers,
-            available_cache_memory=available_cache_memory,
-            devices=devices,
-        )
-
-        # clamp the floor of the inferred batch size to 1 and the ceiling to 4096
-        inferred_batch_size = max(
-            cls._MIN_DEFAULT_BATCH_SIZE,
-            min(inferred_batch_size, cls._MAX_DEFAULT_BATCH_SIZE),
-        )
-        return inferred_batch_size
-
-    @classmethod
     def estimate_weights_size(cls, pipeline_config: PipelineConfig) -> int:
         """Calculates the estimated memory consumption of our model."""
 
@@ -418,6 +404,122 @@ class PipelineModel(ABC, Generic[BaseContextType]):
         This is an abstract method that must be implemented by concrete PipelineModels
         to define their specific execution logic.
         """
+
+    def _execution_trace_inputs(
+        self, model_inputs: ModelInputs
+    ) -> Sequence[Buffer]:
+        raise NotImplementedError(
+            "Device graph inputs not implemented for model. "
+            "Override _execution_trace_inputs to enable capture."
+        )
+
+    def execute_with_capture(
+        self,
+        model_inputs: ModelInputs,
+        batch_size: int,
+    ) -> ModelOutputs:
+        """Executes the model with optional capture handling.
+
+        Subclasses can override this to integrate device graph capture/replay.
+        """
+        if not getattr(self, "_device_graph_capture_enabled", False):
+            return self.execute(model_inputs)
+
+        model = getattr(self, "model", None)
+        if model is None or not hasattr(model, "replay"):
+            raise RuntimeError(
+                "Device graph capture is enabled but model does not support capture."
+            )
+
+        if batch_size > 1:
+            return self.execute(model_inputs)
+
+        self.pre_capture_execution_trace([model_inputs], batch_size)
+
+        graph_inputs = list(self._execution_trace_inputs(model_inputs))
+
+        state = self._device_graph_states.get(InputKey(*graph_inputs))
+
+        if state is None:
+            return self.execute(model_inputs)
+
+        if not self._copy_graph_inputs(graph_inputs, state.buffers):
+            return self.execute(model_inputs)
+
+        try:
+            model.replay(*state.buffers)
+        except Exception:
+            logger.exception("Device graph replay failed for replica.")
+            raise
+
+        return state.outputs
+
+    def pre_capture_execution_trace(
+        self,
+        model_inputs: Sequence[ModelInputs],
+        batch_size: int,
+    ) -> None:
+        if not self._device_graph_capture_enabled:
+            return
+
+        model = getattr(self, "model", None)
+        if model is None or not hasattr(model, "capture"):
+            return
+
+        if batch_size > 1:
+            return
+
+        for inputs in model_inputs:
+            graph_inputs = list(self._execution_trace_inputs(inputs))
+
+            key = InputKey(*graph_inputs)
+
+            if key in self._device_graph_states:
+                continue
+
+            try:
+                outputs = model.capture(*graph_inputs)
+            except Exception:
+                logger.exception("Device graph capture failed for replica.")
+                raise
+
+            self._device_graph_states[key] = _DeviceGraphState(
+                buffers=graph_inputs,
+                outputs=ModelOutputs(*outputs),
+            )
+            logger.info(
+                f"Device graph captured {len(self._device_graph_states)}."
+            )
+
+    def _copy_graph_inputs(
+        self, src: Sequence[Buffer], dst: Sequence[Buffer]
+    ) -> bool:
+        if len(src) != len(dst):
+            logger.error(
+                "Device graph input count mismatch: src=%s dst=%s",
+                len(src),
+                len(dst),
+            )
+            return False
+
+        for src_value, dst_value in zip(src, dst, strict=True):
+            if src_value is dst_value:
+                continue
+
+            try:
+                dst_value.inplace_copy_from(src_value)
+            except ValueError:
+                logger.error(
+                    "Device graph input mismatch: src_shape=%s dst_shape=%s src_dtype=%s dst_dtype=%s src_device=%s dst_device=%s",
+                    src_value.shape,
+                    dst_value.shape,
+                    src_value.dtype,
+                    dst_value.dtype,
+                    src_value.device,
+                    dst_value.device,
+                )
+                return False
+        return True
 
     @abstractmethod
     def prepare_initial_token_inputs(

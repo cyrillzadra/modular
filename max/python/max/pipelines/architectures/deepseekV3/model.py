@@ -1,5 +1,5 @@
 # ===----------------------------------------------------------------------=== #
-# Copyright (c) 2025, Modular Inc. All rights reserved.
+# Copyright (c) 2026, Modular Inc. All rights reserved.
 #
 # Licensed under the Apache License v2.0 with LLVM Exceptions:
 # https://llvm.org/LICENSE.txt
@@ -37,13 +37,13 @@ from max.pipelines.lib import (
 )
 from max.pipelines.lib.config_enums import PipelineRole
 from max.pipelines.lib.float8 import parse_float8_config
+from max.pipelines.lib.utils import compute_data_parallel_splits
 from max.support.algorithm import flatten2d
 from max.support.human_readable_formatter import to_human_readable_bytes
 from transformers import AutoConfig
 from typing_extensions import override
 
 from ..deepseekV2.model import DeepseekV2Inputs, DeepseekV2Model
-from ..llama3.data_parallel_llama import compute_data_parallel_splits
 from .deepseekV3 import DeepseekV3
 from .model_config import DeepseekV3Config
 
@@ -171,16 +171,8 @@ class DeepseekV3Model(AlwaysSignalBuffersMixin, DeepseekV2Model):
         else:
             float8_config = None
 
-        nvfp4_enabled = float8_config is not None and float8_config.is_nvfp4
-
-        # Disable EP in virtual device mode (compilation-only) since NVSHMEM
-        # functions cannot be linked without real GPU devices
-        if is_virtual_device_mode():
-            ep_config = None
-            logger.info(
-                "Disabling expert parallelism in virtual device mode (compilation-only)"
-            )
-        elif self.pipeline_config.ep_size == 1:
+        # Check if EP should be configured
+        if self.pipeline_config.ep_size == 1:
             ep_config = None
         else:
             if self.pipeline_config.ep_size % len(self.devices) != 0:
@@ -189,9 +181,8 @@ class DeepseekV3Model(AlwaysSignalBuffersMixin, DeepseekV2Model):
                     " be set to the total number of GPUs across nodes."
                 )
             n_nodes = self.pipeline_config.ep_size // len(self.devices)
-            dispatch_dtype = DType.bfloat16 if nvfp4_enabled else dtype
             ep_kwargs: dict[str, Any] = dict(
-                dispatch_dtype=dispatch_dtype,
+                dispatch_dtype=dtype,
                 combine_dtype=DType.bfloat16,
                 hidden_size=config.hidden_size,
                 top_k=config.num_experts_per_tok,
@@ -207,8 +198,8 @@ class DeepseekV3Model(AlwaysSignalBuffersMixin, DeepseekV2Model):
                 # the same shape as routed experts.
                 ep_kwargs["fused_shared_expert"] = True
 
-            if float8_config is not None and not nvfp4_enabled:
-                ep_kwargs["dispatch_fp8_config"] = float8_config.input_scale
+            if float8_config is not None:
+                ep_kwargs["dispatch_fp8_config"] = float8_config
 
             ep_config = EPConfig(**ep_kwargs)
             _validate_ep_kernel_limits(ep_config)
@@ -377,7 +368,7 @@ class DeepseekV3Model(AlwaysSignalBuffersMixin, DeepseekV2Model):
                 * max_kv_length
                 * huggingface_config.num_attention_heads
                 * huggingface_config.qk_nope_head_dim
-                * encoding.cache_dtype.size_in_bytes
+                * pipeline_config.model.kv_cache.cache_dtype.size_in_bytes
             )
 
         # Estimate activation memory during Expert Parallel MoE.
@@ -466,7 +457,10 @@ class DeepseekV3Model(AlwaysSignalBuffersMixin, DeepseekV2Model):
             raise ValueError("Only the EP strategy is supported.")
 
         self.ep_comm_initializer: EPCommInitializer | None = None
-        if config.ep_config is not None:
+        # Skip EP initialization in virtual device mode (compilation-only)
+        # since NVSHMEM functions cannot be linked without real GPU devices.
+        # We still keep ep_config to generate the correct graph structure.
+        if config.ep_config is not None and not is_virtual_device_mode():
             self.ep_comm_initializer = EPCommInitializer(config.ep_config)
             self.ep_comm_initializer.ep_init(session)
             if config.ep_config.node_id == -1:
@@ -557,18 +551,44 @@ class DeepseekV3Model(AlwaysSignalBuffersMixin, DeepseekV2Model):
             *model_inputs.batch_context_lengths,
             *ep_inputs,
         )
-        if len(model_outputs) == 4:
+
+        num_hidden_state_outputs = len(self.devices)
+        num_outputs = len(model_outputs)
+
+        # Possible output configurations:
+        # - 1 output: next_token_logits only
+        # - 3 outputs: next_token_logits, logits, logit_offsets (variable logits)
+        # - 1 + N: next_token_logits + hidden_states (one per device)
+        # - 3 + N: next_token_logits, logits, logit_offsets + hidden_states (one per device)
+
+        if num_outputs == 3 + num_hidden_state_outputs:
             assert isinstance(model_outputs[0], Buffer)
             assert isinstance(model_outputs[1], Buffer)
             assert isinstance(model_outputs[2], Buffer)
-            assert isinstance(model_outputs[3], Buffer)
+            hidden_states_list: list[Buffer] = []
+            for i in range(num_hidden_state_outputs):
+                hs = model_outputs[3 + i]
+                assert isinstance(hs, Buffer)
+                hidden_states_list.append(hs)
             return ModelOutputs(
                 next_token_logits=model_outputs[0],
                 logits=model_outputs[1],
                 logit_offsets=model_outputs[2],
-                hidden_states=model_outputs[3],
+                hidden_states=hidden_states_list,
             )
-        elif len(model_outputs) == 3:
+        elif num_outputs == 1 + num_hidden_state_outputs:
+            assert isinstance(model_outputs[0], Buffer)
+            hidden_states_list = []
+            for i in range(num_hidden_state_outputs):
+                hs = model_outputs[1 + i]
+                assert isinstance(hs, Buffer)
+                hidden_states_list.append(hs)
+            return ModelOutputs(
+                next_token_logits=model_outputs[0],
+                logits=model_outputs[0],
+                hidden_states=hidden_states_list,
+            )
+        elif num_outputs == 3:
             assert isinstance(model_outputs[0], Buffer)
             assert isinstance(model_outputs[1], Buffer)
             assert isinstance(model_outputs[2], Buffer)

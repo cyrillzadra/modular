@@ -36,12 +36,14 @@ from max.driver import load_devices, scan_available_devices
 from max.dtype import DType
 from max.graph import DeviceRef
 from max.nn.legacy.kv_cache import KVCacheParams
+from max.nn.legacy.kv_cache.cache_params import KVCacheParamInterface
 from max.pipelines.lib.kv_cache_config import KVCacheConfig
 from max.pipelines.lib.utils import upper_bounded_default
 from typing_extensions import Self, override
 
 if TYPE_CHECKING:
     from max.pipelines.lib.config import PipelineConfig
+    from transformers import AutoConfig
 
 
 @runtime_checkable
@@ -52,20 +54,20 @@ class ArchConfig(Protocol):
     def initialize(cls, pipeline_config: PipelineConfig) -> Self:
         """Initialize the config from a PipelineConfig."""
 
-
-@runtime_checkable
-class ArchConfigWithKVCache(ArchConfig, Protocol):
-    """Config for a model architecture that uses a KV cache."""
-
-    def get_kv_params(self) -> KVCacheParams:
-        """KV cache parameters to use when running the model."""
-
     def get_max_seq_len(self) -> int:
         """The default maximum sequence length that can be processed by the
         model.
 
         Subclasses should determine whether this value can be overridden by
         setting the `--max-length` (`pipeline_config.max_length`) flag."""
+
+
+@runtime_checkable
+class ArchConfigWithKVCache(ArchConfig, Protocol):
+    """Config for a model architecture that uses a KV cache."""
+
+    def get_kv_params(self) -> KVCacheParamInterface:
+        """KV cache parameters to use when running the model."""
 
 
 def _all_available_devices() -> list[DeviceRef]:
@@ -100,6 +102,8 @@ class ArchConfigWithAttentionKVCache(ArchConfigWithKVCache, abc.ABC):
     user_provided_max_length: int | None = None
     """Override for the maximum sequence length."""
 
+    huggingface_config: AutoConfig | None = None
+
     _kv_params: KVCacheParams | None = None
 
     @override
@@ -115,10 +119,11 @@ class ArchConfigWithAttentionKVCache(ArchConfigWithKVCache, abc.ABC):
                 DeviceRef(device_type=d.device_type, id=d.id)
                 for d in pipeline_config.model.device_specs
             ],
-            cache_dtype=pipeline_config.model.quantization_encoding.cache_dtype,
+            cache_dtype=pipeline_config.model.kv_cache.cache_dtype,
             kv_cache=pipeline_config.model.kv_cache,
             data_parallel_degree=pipeline_config.model.data_parallel_degree,
             user_provided_max_length=pipeline_config.max_length,
+            huggingface_config=pipeline_config.model.huggingface_config,
         )
 
     def get_max_seq_len(self) -> int:

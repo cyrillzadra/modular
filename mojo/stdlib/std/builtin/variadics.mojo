@@ -1,5 +1,5 @@
 # ===----------------------------------------------------------------------=== #
-# Copyright (c) 2025, Modular Inc. All rights reserved.
+# Copyright (c) 2026, Modular Inc. All rights reserved.
 #
 # Licensed under the Apache License v2.0 with LLVM Exceptions:
 # https://llvm.org/LICENSE.txt
@@ -679,7 +679,7 @@ struct VariadicListMem[
                          list.
         """
 
-        __comptime_assert (
+        comptime assert (
             Self.is_owned
         ), "consume_elements may only be called on owned variadic lists"
 
@@ -750,7 +750,6 @@ struct VariadicListMem[
 # ===-----------------------------------------------------------------------===#
 
 
-@register_passable
 struct VariadicPack[
     elt_is_mutable: Bool,
     origin: Origin[mut=elt_is_mutable],
@@ -758,7 +757,7 @@ struct VariadicPack[
     is_owned: Bool,
     element_trait: type_of(AnyType),
     *element_types: element_trait,
-](Sized):
+](RegisterType, Sized):
     """A utility class to access heterogeneous variadic function arguments.
 
     `VariadicPack` is used when you need to accept variadic arguments where each
@@ -881,7 +880,7 @@ struct VariadicPack[
                          pack.
         """
 
-        __comptime_assert (
+        comptime assert (
             Self.is_owned
         ), "consume_elements may only be called on owned variadic packs"
 
@@ -991,6 +990,54 @@ struct VariadicPack[
         """This returns the stored KGEN pack after loading all of the elements.
         """
         return __mlir_op.`kgen.pack.load`(self.get_as_kgen_pack())
+
+    fn _write_to[
+        O1: ImmutOrigin,
+        O2: ImmutOrigin,
+        O3: ImmutOrigin,
+        *,
+        is_repr: Bool = False,
+    ](
+        self: VariadicPack[_, Writable, ...],
+        mut writer: Some[Writer],
+        start: StringSlice[O1] = StaticString(""),
+        end: StringSlice[O2] = StaticString(""),
+        sep: StringSlice[O3] = StaticString(", "),
+    ):
+        """Writes a sequence of writable values from a pack to a writer with
+        delimiters.
+
+        This function formats a variadic pack of writable values as a delimited
+        sequence, writing each element separated by the specified separator and
+        enclosed by start and end delimiters.
+
+        Parameters:
+            O1: The origin of the open `StringSlice`.
+            O2: The origin of the close `StringSlice`.
+            O3: The origin of the separator `StringSlice`.
+            is_repr: Whether to use repr formatting for elements.
+
+        Args:
+            writer: The writer to write to.
+            start: The starting delimiter.
+            end: The ending delimiter.
+            sep: The separator between items.
+        """
+        writer.write_string(start)
+
+        @parameter
+        for i in range(self.__len__()):
+
+            @parameter
+            if i != 0:
+                writer.write_string(sep)
+
+            @parameter
+            if is_repr:
+                self[i].write_repr_to(writer)
+            else:
+                self[i].write_to(writer)
+        writer.write_string(end)
 
 
 # ===-----------------------------------------------------------------------===#

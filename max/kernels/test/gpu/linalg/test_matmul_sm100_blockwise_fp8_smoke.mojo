@@ -1,5 +1,5 @@
 # ===----------------------------------------------------------------------=== #
-# Copyright (c) 2025, Modular Inc. All rights reserved.
+# Copyright (c) 2026, Modular Inc. All rights reserved.
 #
 # Licensed under the Apache License v2.0 with LLVM Exceptions:
 # https://llvm.org/LICENSE.txt
@@ -192,7 +192,10 @@ fn test_blackwell_matmul_tma_umma_warp_specialized_blockwise_fp8[
         cta_group=cta_group,
     )
 
-    blockwise_fp8_matmul[transpose_b=transpose_b, config=matmul_config,](
+    blockwise_fp8_matmul[
+        transpose_b=transpose_b,
+        config=matmul_config,
+    ](
         c,
         a,
         b,

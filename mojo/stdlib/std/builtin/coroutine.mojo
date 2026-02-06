@@ -1,5 +1,5 @@
 # ===----------------------------------------------------------------------=== #
-# Copyright (c) 2025, Modular Inc. All rights reserved.
+# Copyright (c) 2026, Modular Inc. All rights reserved.
 #
 # Licensed under the Apache License v2.0 with LLVM Exceptions:
 # https://llvm.org/LICENSE.txt
@@ -77,8 +77,9 @@ fn _coro_resume_noop_callback(null: AnyCoroutine):
 
 
 @explicit_destroy
-@register_passable
-struct Coroutine[type: ImplicitlyDestructible, origins: OriginSet]:
+struct Coroutine[type: ImplicitlyDestructible, origins: OriginSet](
+    RegisterType
+):
     """Represents a coroutine.
 
     Coroutines can pause execution saving the state of the program (including
@@ -105,7 +106,7 @@ struct Coroutine[type: ImplicitlyDestructible, origins: OriginSet]:
         Returns:
             The coroutine context.
         """
-        __comptime_assert (
+        comptime assert (
             size_of[_CoroutineContext]() == size_of[ctx_type]()
         ), "context size must be 16 bytes"
         return __mlir_op.`co.get_callback_ptr`[
@@ -162,8 +163,7 @@ struct Coroutine[type: ImplicitlyDestructible, origins: OriginSet]:
 
 
 @explicit_destroy
-@register_passable
-struct RaisingCoroutine[type: AnyType, origins: OriginSet]:
+struct RaisingCoroutine[type: AnyType, origins: OriginSet](RegisterType):
     """Represents a coroutine that can raise.
 
     Coroutines can pause execution saving the state of the program (including
@@ -190,7 +190,7 @@ struct RaisingCoroutine[type: AnyType, origins: OriginSet]:
         Returns:
             The coroutine context.
         """
-        __comptime_assert (
+        comptime assert (
             size_of[_CoroutineContext]() == size_of[ctx_type]()
         ), "context size must be 16 bytes"
         return __mlir_op.`co.get_callback_ptr`[

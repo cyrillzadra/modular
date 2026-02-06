@@ -1,5 +1,5 @@
 # ===----------------------------------------------------------------------=== #
-# Copyright (c) 2025, Modular Inc. All rights reserved.
+# Copyright (c) 2026, Modular Inc. All rights reserved.
 #
 # Licensed under the Apache License v2.0 with LLVM Exceptions:
 # https://llvm.org/LICENSE.txt
@@ -20,8 +20,7 @@ from layout._utils import ManagedLayoutTensor
 
 
 @fieldwise_init
-@register_passable
-struct Dim(ImplicitlyCopyable, Stringable):
+struct Dim(ImplicitlyCopyable, RegisterType, Stringable):
     var m: Int
     var n: Int
     var k: Int

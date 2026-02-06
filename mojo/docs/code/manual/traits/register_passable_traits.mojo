@@ -1,5 +1,5 @@
 # ===----------------------------------------------------------------------=== #
-# Copyright (c) 2025, Modular Inc. All rights reserved.
+# Copyright (c) 2026, Modular Inc. All rights reserved.
 #
 # Licensed under the Apache License v2.0 with LLVM Exceptions:
 # https://llvm.org/LICENSE.txt
@@ -14,8 +14,7 @@
 
 # Note: this code doesn't appear in the doc; it tests the assertions
 # in the doc.
-@register_passable
-trait RegPassableTrait:
+trait RegPassableTrait(RegisterType):
     fn __init__(out self):
         ...
 
@@ -23,7 +22,6 @@ trait RegPassableTrait:
         ...
 
 
-@register_passable
 struct RegPassableType(RegPassableTrait):
     fn __init__(out self):
         pass

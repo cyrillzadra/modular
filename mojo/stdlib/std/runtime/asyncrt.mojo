@@ -1,5 +1,5 @@
 # ===----------------------------------------------------------------------=== #
-# Copyright (c) 2025, Modular Inc. All rights reserved.
+# Copyright (c) 2026, Modular Inc. All rights reserved.
 #
 # Licensed under the Apache License v2.0 with LLVM Exceptions:
 # https://llvm.org/LICENSE.txt
@@ -14,7 +14,7 @@
 
 from os import abort
 from os.atomic import Atomic
-from sys import external_call
+from ffi import external_call
 
 from builtin.coroutine import AnyCoroutine, _coro_resume_fn, _suspend_async
 from gpu.host import DeviceContext
@@ -294,8 +294,7 @@ struct TaskGroupContext(TrivialRegisterType):
     """Pointer to the TaskGroup that owns or is associated with this context."""
 
 
-@register_passable
-struct _TaskGroupBox(Copyable):
+struct _TaskGroupBox(Copyable, RegisterType):
     """This struct is a type-erased owning box for an opaque coroutine."""
 
     var handle: AnyCoroutine
