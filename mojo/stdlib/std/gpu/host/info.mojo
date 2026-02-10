@@ -1833,6 +1833,23 @@ fn _get_880m_target() -> _TargetType:
     ]
 
 
+fn _get_890m_target() -> _TargetType:
+    """Creates an MLIR target configuration for AMD Radeon 890M GPU.
+
+    Returns:
+        MLIR target configuration for 890M.
+    """
+    return __mlir_attr[
+        `#kgen.target<triple = "amdgcn-amd-amdhsa", `,
+        `arch = "gfx1150", `,
+        `features = "", `,
+        `data_layout = "e-m:e-p:64:64-p1:64:64-p2:32:32-p3:32:32-p4:64:64-p5:32:32-p6:32:32-p7:160:256:256:32-p8:128:128:128:48-p9:192:256:256:32-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-v2048:2048-n32:64-S32-A5-G1-ni:7:8:9",`,
+        `index_bit_width = 64,`,
+        `simd_bit_width = 128`,
+        `> : !kgen.target`,
+    ]
+
+
 fn _get_8060s_target() -> _TargetType:
     """Creates an MLIR target configuration for AMD Radeon 8060S GPU.
 
@@ -1964,6 +1981,18 @@ comptime Radeon880m = GPUInfo.from_family(
 )
 """AMD Radeon 880M GPU configuration."""
 
+comptime Radeon890m = GPUInfo.from_family(
+    family=AMDRDNAFamily,
+    name="AMD Radeon 890M Graphics",
+    vendor=Vendor.AMD_GPU,
+    api="hip",
+    arch_name="gfx1150",
+    compute=11.5,
+    version="RDNA3.5",
+    sm_count=16,
+)
+"""AMD Radeon 890M GPU configuration."""
+
 comptime Radeon8060s = GPUInfo.from_family(
     family=AMDRDNAFamily,
     name="Radeon 8060S",
@@ -2085,6 +2114,8 @@ struct GPUInfo(Equatable, RegisterType, Stringable, Writable):
             return _get_780m_target()
         if self.name == "Radeon 880M":
             return _get_880m_target()
+        if self.name == "AMD Radeon 890M Graphics":
+            return _get_890m_target()
         if self.name == "Radeon 8060S":
             return _get_8060s_target()
         if self.name == "Radeon 860M":
@@ -2432,6 +2463,7 @@ fn _get_info_from_target[target_arch0: StaticString]() -> GPUInfo:
     elif target_arch == "gfx1103":
         return materialize[Radeon780m]()
     elif target_arch == "gfx1150":
+        # FIXME: Radeon 880M and 890M both use gfx1150 but differ in CU count.
         return materialize[Radeon880m]()
     elif target_arch == "gfx1151":
         return materialize[Radeon8060s]()

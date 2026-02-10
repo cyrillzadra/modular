@@ -1,5 +1,5 @@
 # Avoid PATH leaking into actions
-common --incompatible_strict_action_env
+# common --incompatible_strict_action_env
 
 # Don't fail on unknown GPUs, add needed GPUs to common.MODULE.bazel
 common --repo_env=MOJO_IGNORE_UNKNOWN_GPUS=1

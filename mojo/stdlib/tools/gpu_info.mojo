@@ -64,6 +64,8 @@ def main():
     var major = compute_capability // 10
     var minor = compute_capability % 10
 
+    print(ctx.api())
+
     if ctx.api() == "cuda":
         print("GPUInfo(")
         print('name="' + ctx.name() + '", ')
